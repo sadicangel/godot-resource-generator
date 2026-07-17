@@ -128,7 +128,7 @@ public sealed class GodotResourceGenerator : IIncrementalGenerator
                     declaration.ResourceType.ToDisplayString(TypeDisplayFormat)));
             }
 
-            if (!IsValidResourceBase(declaration, godotSymbols, diagnostics))
+            if (!IsValidResourceBase(declaration, declarations, godotSymbols, diagnostics))
             {
                 invalidDeclarations.Add(declaration);
             }
@@ -176,6 +176,11 @@ public sealed class GodotResourceGenerator : IIncrementalGenerator
         var resolver = new TypeResolver(mappings, godotSymbols);
         var properties = ImmutableArray.CreateBuilder<PropertyInfo>();
         var hasErrors = false;
+        var effectiveBaseType = GetEffectiveBaseResourceType(declaration, godotSymbols);
+        var inheritedResourceProperties = GetInheritedResourceProperties(effectiveBaseType, godotSymbols);
+        var compatibleGeneratedBaseResource = FindCompatibleGeneratedBaseResource(declaration, effectiveBaseType, mappings, godotSymbols);
+        var generatedBasePropertyNames = GetGeneratedBaseResourcePropertyNames(compatibleGeneratedBaseResource);
+        var shouldCallBaseCopyFrom = compatibleGeneratedBaseResource is not null;
 
         foreach (var property in GetModelProperties(declaration.ModelType!))
         {
@@ -187,7 +192,15 @@ public sealed class GodotResourceGenerator : IIncrementalGenerator
                 continue;
             }
 
-            properties.Add(new PropertyInfo(property.Name, EscapeIdentifier(property.Name), mapping));
+            var hasInheritedResourceProperty = inheritedResourceProperties.TryGetValue(property.Name, out var inheritedResourceProperty);
+            var hasGeneratedBaseProperty = generatedBasePropertyNames.Contains(property.Name);
+            var shouldDeclare = !hasInheritedResourceProperty && !hasGeneratedBaseProperty;
+            var shouldCopy = shouldDeclare
+                || (!shouldCallBaseCopyFrom
+                    && inheritedResourceProperty is not null
+                    && IsWritableInheritedResourceProperty(inheritedResourceProperty));
+
+            properties.Add(new PropertyInfo(property.Name, EscapeIdentifier(property.Name), mapping, shouldDeclare, shouldCopy));
         }
 
         if (hasErrors)
@@ -199,7 +212,6 @@ public sealed class GodotResourceGenerator : IIncrementalGenerator
         var @namespace = resourceType.ContainingNamespace.IsGlobalNamespace
             ? string.Empty
             : resourceType.ContainingNamespace.ToDisplayString();
-        var effectiveBaseType = GetEffectiveBaseResourceType(declaration, godotSymbols);
 
         return new ResourceInfo(
             GetHintName(resourceType),
@@ -210,6 +222,7 @@ public sealed class GodotResourceGenerator : IIncrementalGenerator
             FullyQualifiedTypeName(declaration.ModelType!),
             FullyQualifiedTypeName(effectiveBaseType),
             declaration.ExplicitBaseType is null,
+            shouldCallBaseCopyFrom,
             properties.ToImmutable());
     }
 
@@ -241,6 +254,7 @@ public sealed class GodotResourceGenerator : IIncrementalGenerator
 
     private static bool IsValidResourceBase(
         ResourceDeclaration declaration,
+        ImmutableArray<ResourceDeclaration> declarations,
         GodotSymbols godotSymbols,
         ImmutableArray<Diagnostic>.Builder diagnostics)
     {
@@ -268,7 +282,8 @@ public sealed class GodotResourceGenerator : IIncrementalGenerator
 
         if (effectiveBaseType.IsUnboundGenericType
             || effectiveBaseType.TypeKind != TypeKind.Class
-            || !InheritsFrom(effectiveBaseType, godotSymbols.Resource))
+            || (!InheritsFrom(effectiveBaseType, godotSymbols.Resource)
+                && !IsGeneratedResourceType(effectiveBaseType, declarations)))
         {
             var location = declaration.AttributeBaseResourceType is not null
                 ? declaration.AttributeLocation
@@ -282,6 +297,19 @@ public sealed class GodotResourceGenerator : IIncrementalGenerator
         }
 
         return true;
+    }
+
+    private static bool IsGeneratedResourceType(INamedTypeSymbol type, ImmutableArray<ResourceDeclaration> declarations)
+    {
+        foreach (var declaration in declarations)
+        {
+            if (SymbolEqualityComparer.Default.Equals(type, declaration.ResourceType))
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     private static Diagnostic CreateInvalidResourceBaseDiagnostic(
@@ -442,6 +470,85 @@ public sealed class GodotResourceGenerator : IIncrementalGenerator
             && property.GetMethod?.DeclaredAccessibility == Accessibility.Public;
     }
 
+    private static IReadOnlyDictionary<string, IPropertySymbol> GetInheritedResourceProperties(
+        INamedTypeSymbol effectiveBaseType,
+        GodotSymbols godotSymbols)
+    {
+        var properties = new Dictionary<string, IPropertySymbol>(StringComparer.Ordinal);
+
+        for (var type = effectiveBaseType;
+            type is not null && !SymbolEqualityComparer.Default.Equals(type, godotSymbols.Resource);
+            type = type.BaseType)
+        {
+            foreach (var property in type.GetMembers().OfType<IPropertySymbol>())
+            {
+                if (IsAccessibleInheritedResourceProperty(property) && !properties.ContainsKey(property.Name))
+                {
+                    properties.Add(property.Name, property);
+                }
+            }
+        }
+
+        return properties;
+    }
+
+    private static bool IsAccessibleInheritedResourceProperty(IPropertySymbol property)
+    {
+        return !property.IsStatic
+            && !property.IsIndexer
+            && IsAccessibleFromDerivedGeneratedType(property.DeclaredAccessibility);
+    }
+
+    private static bool IsWritableInheritedResourceProperty(IPropertySymbol property)
+    {
+        return property.SetMethod is not null
+            && !property.SetMethod.IsInitOnly
+            && IsAccessibleFromDerivedGeneratedType(property.SetMethod.DeclaredAccessibility);
+    }
+
+    private static bool IsAccessibleFromDerivedGeneratedType(Accessibility accessibility)
+    {
+        return accessibility is Accessibility.Public
+            or Accessibility.Internal
+            or Accessibility.Protected
+            or Accessibility.ProtectedOrInternal
+            or Accessibility.ProtectedAndInternal;
+    }
+
+    private static ResourceDeclaration? FindCompatibleGeneratedBaseResource(
+        ResourceDeclaration declaration,
+        INamedTypeSymbol effectiveBaseType,
+        IReadOnlyDictionary<ITypeSymbol, ResourceDeclaration> mappings,
+        GodotSymbols godotSymbols)
+    {
+        if (SymbolEqualityComparer.Default.Equals(effectiveBaseType, godotSymbols.Resource)
+            || declaration.ModelType is null)
+        {
+            return null;
+        }
+
+        return mappings.Values.FirstOrDefault(candidate =>
+            candidate.ModelType is not null
+            && SymbolEqualityComparer.Default.Equals(candidate.ResourceType, effectiveBaseType)
+            && InheritsFrom(declaration.ModelType, candidate.ModelType));
+    }
+
+    private static HashSet<string> GetGeneratedBaseResourcePropertyNames(ResourceDeclaration? generatedBaseResource)
+    {
+        var names = new HashSet<string>(StringComparer.Ordinal);
+        if (generatedBaseResource?.ModelType is null)
+        {
+            return names;
+        }
+
+        foreach (var property in GetModelProperties(generatedBaseResource.ModelType))
+        {
+            names.Add(property.Name);
+        }
+
+        return names;
+    }
+
     private static string GenerateSource(ResourceInfo resource)
     {
         var builder = new IndentedStringBuilder();
@@ -463,7 +570,7 @@ public sealed class GodotResourceGenerator : IIncrementalGenerator
         builder.AppendLine("{");
         builder.IncreaseIndent();
 
-        foreach (var property in resource.Properties)
+        foreach (var property in resource.Properties.Where(static property => property.ShouldDeclare))
         {
             builder.AppendLine("[global::Godot.Export]");
             builder.AppendLine($"public {property.Mapping.OutputType} {property.EscapedName} {{ get; set; }}");
@@ -487,12 +594,18 @@ public sealed class GodotResourceGenerator : IIncrementalGenerator
         builder.IncreaseIndent();
         builder.AppendLine("if (model is null) throw new global::System.ArgumentNullException(nameof(model));");
 
-        if (!resource.Properties.IsDefaultOrEmpty)
+        var propertiesToCopy = resource.Properties.Where(static property => property.ShouldCopy).ToImmutableArray();
+        if (resource.ShouldCallBaseCopyFrom || !propertiesToCopy.IsDefaultOrEmpty)
         {
             builder.AppendLine();
         }
 
-        foreach (var property in resource.Properties)
+        if (resource.ShouldCallBaseCopyFrom)
+        {
+            builder.AppendLine("base.CopyFrom(model);");
+        }
+
+        foreach (var property in propertiesToCopy)
         {
             AppendCopyAssignment(builder, property, $"model.{property.EscapedName}", property.EscapedName);
         }
@@ -720,7 +833,7 @@ public sealed class GodotResourceGenerator : IIncrementalGenerator
         {
             if (IsNullableValueType(type))
             {
-                return null;
+                return ResolveNullableValueType(type);
             }
 
             if (ContainsUnresolvedType(type))
@@ -807,6 +920,22 @@ public sealed class GodotResourceGenerator : IIncrementalGenerator
                 {
                     return mappedResource;
                 }
+            }
+
+            return null;
+        }
+
+        private TypeMapping? ResolveNullableValueType(ITypeSymbol type)
+        {
+            if (type is not INamedTypeSymbol namedType || namedType.TypeArguments.Length != 1)
+            {
+                return null;
+            }
+
+            var underlyingType = namedType.TypeArguments[0];
+            if (ContainsUnresolvedType(underlyingType) || IsDirectVariantType(underlyingType))
+            {
+                return TypeMapping.Direct(FullyQualifiedTypeName(type));
             }
 
             return null;
@@ -1039,9 +1168,10 @@ public sealed class GodotResourceGenerator : IIncrementalGenerator
         string ModelTypeName,
         string BaseTypeName,
         bool ShouldDeclareBase,
+        bool ShouldCallBaseCopyFrom,
         ImmutableArray<PropertyInfo> Properties);
 
-    private sealed record PropertyInfo(string Name, string EscapedName, TypeMapping Mapping);
+    private sealed record PropertyInfo(string Name, string EscapedName, TypeMapping Mapping, bool ShouldDeclare, bool ShouldCopy);
 
     private sealed record TypeMapping(string OutputType, TypeMappingKind Kind, TypeMapping? ElementMapping)
     {

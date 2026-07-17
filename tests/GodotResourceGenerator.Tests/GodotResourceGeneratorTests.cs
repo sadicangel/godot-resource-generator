@@ -190,6 +190,82 @@ public sealed class GodotResourceGeneratorTests
     }
 
     [Fact]
+    public void Does_not_redeclare_properties_supplied_by_handwritten_resource_base()
+    {
+        var result = GeneratorTestDriver.Run("""
+            using Godot;
+            using GodotResourceGenerator;
+
+            namespace Demo;
+
+            public enum Seat
+            {
+                Red,
+                Blue,
+            }
+
+            public abstract record GameEvent(string? ClientRequestId);
+
+            public sealed record MatchEndedEvent(
+                Seat? Winner,
+                string? ClientRequestId)
+                : GameEvent(ClientRequestId);
+
+            public abstract partial class GameEventResource : Resource
+            {
+                [Export] public string? ClientRequestId { get; set; }
+            }
+
+            [GodotResource(typeof(MatchEndedEvent))]
+            public partial class MatchEndedEventResource : GameEventResource;
+            """);
+
+        result.AssertNoErrors();
+        var generated = Assert.Single(result.GeneratedResourceSources).Source;
+
+        Assert.Contains("public global::Demo.Seat? Winner { get; set; }", generated);
+        Assert.DoesNotContain("ClientRequestId { get; set; }", generated);
+        Assert.Contains("ClientRequestId = model.ClientRequestId;", generated);
+    }
+
+    [Fact]
+    public void Calls_generated_base_copy_for_properties_supplied_by_generated_resource_base()
+    {
+        var result = GeneratorTestDriver.Run("""
+            using GodotResourceGenerator;
+
+            namespace Demo;
+
+            public enum Seat
+            {
+                Red,
+                Blue,
+            }
+
+            public abstract record GameEvent(string? ClientRequestId);
+
+            public sealed record MatchEndedEvent(
+                Seat? Winner,
+                string? ClientRequestId)
+                : GameEvent(ClientRequestId);
+
+            [GodotResource(typeof(GameEvent))]
+            public partial class GameEventResource;
+
+            [GodotResource(typeof(MatchEndedEvent))]
+            public partial class MatchEndedEventResource : GameEventResource;
+            """);
+
+        result.AssertNoErrors();
+        var generated = result.GeneratedResourceSources.Single(source => source.HintName == "Demo.MatchEndedEventResource.GodotResource.g.cs").Source;
+
+        Assert.Contains("public global::Demo.Seat? Winner { get; set; }", generated);
+        Assert.DoesNotContain("ClientRequestId { get; set; }", generated);
+        Assert.Contains("base.CopyFrom(model);", generated);
+        Assert.DoesNotContain("ClientRequestId = model.ClientRequestId;", generated);
+    }
+
+    [Fact]
     public void Reports_mismatched_attribute_and_explicit_resource_base_type()
     {
         var result = GeneratorTestDriver.Run("""
@@ -370,14 +446,44 @@ public sealed class GodotResourceGeneratorTests
     }
 
     [Fact]
-    public void Reports_nullable_value_type()
+    public void Generates_nullable_export_when_underlying_type_is_directly_supported()
+    {
+        var result = GeneratorTestDriver.Run("""
+            using GodotResourceGenerator;
+
+            namespace Demo;
+
+            public enum Seat
+            {
+                Red,
+                Blue,
+            }
+
+            public class User
+            {
+                public Seat? Seat { get; set; }
+            }
+
+            [GodotResource(typeof(User))]
+            public partial class UserResource;
+            """);
+
+        result.AssertNoErrors();
+        var generated = Assert.Single(result.GeneratedResourceSources).Source;
+
+        Assert.Contains("public global::Demo.Seat? Seat { get; set; }", generated);
+        Assert.Contains("Seat = model.Seat;", generated);
+    }
+
+    [Fact]
+    public void Reports_nullable_value_type_when_underlying_type_is_unsupported()
     {
         var result = GeneratorTestDriver.Run("""
             using GodotResourceGenerator;
 
             public class User
             {
-                public int? Age { get; set; }
+                public decimal? Balance { get; set; }
             }
 
             [GodotResource(typeof(User))]

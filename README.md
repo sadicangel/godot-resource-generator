@@ -102,6 +102,7 @@ The generator supports public readable instance properties whose types can be ex
 
 - C# primitive Variant-compatible types and `string`.
 - Enums.
+- Nullable value types when the underlying type is supported, such as `int?` or `MyEnum?`.
 - Godot built-in structs such as `Vector2`, `Vector3`, and `Color`.
 - Types deriving from `Godot.GodotObject`.
 - `Godot.Collections.Array`, `Array<T>`, `Dictionary`, and `Dictionary<TKey, TValue>` when generic arguments are supported.
