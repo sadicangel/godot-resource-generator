@@ -135,6 +135,142 @@ public sealed class GodotResourceGeneratorTests
     }
 
     [Fact]
+    public void Attribute_base_type_changes_generated_resource_base()
+    {
+        var result = GeneratorTestDriver.Run("""
+            using GodotResourceGenerator;
+
+            namespace Demo;
+
+            public class User
+            {
+                public string Name { get; set; }
+            }
+
+            public class InventoryResourceBase : Godot.Resource
+            {
+            }
+
+            [GodotResource(typeof(User), typeof(InventoryResourceBase))]
+            public partial class UserResource;
+            """);
+
+        result.AssertNoErrors();
+        var generated = Assert.Single(result.GeneratedResourceSources).Source;
+
+        Assert.Contains("public partial class UserResource : global::Demo.InventoryResourceBase", generated);
+    }
+
+    [Fact]
+    public void Explicit_resource_base_type_is_honored_without_duplicate_base_clause()
+    {
+        var result = GeneratorTestDriver.Run("""
+            using GodotResourceGenerator;
+
+            namespace Demo;
+
+            public class User
+            {
+                public string Name { get; set; }
+            }
+
+            public class InventoryResourceBase : Godot.Resource
+            {
+            }
+
+            [GodotResource(typeof(User))]
+            public partial class UserResource : InventoryResourceBase;
+            """);
+
+        result.AssertNoErrors();
+        var generated = Assert.Single(result.GeneratedResourceSources).Source;
+
+        Assert.Contains("public partial class UserResource", generated);
+        Assert.DoesNotContain("public partial class UserResource :", generated);
+    }
+
+    [Fact]
+    public void Reports_mismatched_attribute_and_explicit_resource_base_type()
+    {
+        var result = GeneratorTestDriver.Run("""
+            using GodotResourceGenerator;
+
+            namespace Demo;
+
+            public class User
+            {
+                public string Name { get; set; }
+            }
+
+            public class FirstResourceBase : Godot.Resource
+            {
+            }
+
+            public class SecondResourceBase : Godot.Resource
+            {
+            }
+
+            [GodotResource(typeof(User), typeof(FirstResourceBase))]
+            public partial class UserResource : SecondResourceBase;
+            """);
+
+        result.SingleGeneratorDiagnostic("GRG0008");
+        Assert.Empty(result.GeneratedResourceSources);
+    }
+
+    [Fact]
+    public void Reports_non_resource_attribute_base_type()
+    {
+        var result = GeneratorTestDriver.Run("""
+            using GodotResourceGenerator;
+
+            namespace Demo;
+
+            public class User
+            {
+                public string Name { get; set; }
+            }
+
+            public class NotAResource
+            {
+            }
+
+            [GodotResource(typeof(User), typeof(NotAResource))]
+            public partial class UserResource;
+            """);
+
+        result.SingleGeneratorDiagnostic("GRG0008");
+        Assert.Empty(result.GeneratedResourceSources);
+    }
+
+    [Fact]
+    public void Interface_only_partial_resource_declarations_still_default_to_godot_resource()
+    {
+        var result = GeneratorTestDriver.Run("""
+            using GodotResourceGenerator;
+
+            namespace Demo;
+
+            public class User
+            {
+                public string Name { get; set; }
+            }
+
+            public interface IUserResource
+            {
+            }
+
+            [GodotResource(typeof(User))]
+            public partial class UserResource : IUserResource;
+            """);
+
+        result.AssertNoErrors();
+        var generated = Assert.Single(result.GeneratedResourceSources).Source;
+
+        Assert.Contains("public partial class UserResource : global::Godot.Resource", generated);
+    }
+
+    [Fact]
     public void Reports_invalid_resource_target()
     {
         var result = GeneratorTestDriver.Run("""
@@ -214,6 +350,26 @@ public sealed class GodotResourceGeneratorTests
     }
 
     [Fact]
+    public void Allows_unresolved_property_types_without_generator_diagnostic()
+    {
+        var result = GeneratorTestDriver.Run("""
+            using GodotResourceGenerator;
+
+            public class User
+            {
+                public MissingType Missing { get; set; }
+            }
+
+            [GodotResource(typeof(User))]
+            public partial class UserResource;
+            """);
+
+        Assert.Empty(result.GeneratorDiagnostics);
+        Assert.Single(result.GeneratedResourceSources);
+        Assert.Contains(result.CompilationErrors, diagnostic => diagnostic.Id == "CS0246");
+    }
+
+    [Fact]
     public void Reports_nullable_value_type()
     {
         var result = GeneratorTestDriver.Run("""
@@ -249,5 +405,74 @@ public sealed class GodotResourceGeneratorTests
 
         result.SingleGeneratorDiagnostic("GRG0007");
         Assert.Empty(result.GeneratedResourceSources);
+    }
+
+    [Fact]
+    public void Maps_derived_model_properties_to_nearest_mapped_base_resource()
+    {
+        var result = GeneratorTestDriver.Run("""
+            using GodotResourceGenerator;
+
+            namespace Demo;
+
+            public class Animal
+            {
+                public string Name { get; set; }
+            }
+
+            public class Dog : Animal
+            {
+            }
+
+            public class User
+            {
+                public Dog Pet { get; set; }
+            }
+
+            [GodotResource(typeof(Animal))]
+            public partial class AnimalResource;
+
+            [GodotResource(typeof(User))]
+            public partial class UserResource;
+            """);
+
+        result.AssertNoErrors();
+        var generated = result.GeneratedResourceSources.Single(source => source.HintName == "Demo.UserResource.GodotResource.g.cs").Source;
+
+        Assert.Contains("public global::Demo.AnimalResource Pet { get; set; }", generated);
+        Assert.Contains("Pet = model.Pet is null ? null : global::Demo.AnimalResource.FromModel(model.Pet);", generated);
+    }
+
+    [Fact]
+    public void Does_not_map_base_model_property_to_derived_only_resource()
+    {
+        var result = GeneratorTestDriver.Run("""
+            using GodotResourceGenerator;
+
+            namespace Demo;
+
+            public class Animal
+            {
+            }
+
+            public class Dog : Animal
+            {
+            }
+
+            public class User
+            {
+                public Animal Pet { get; set; }
+            }
+
+            [GodotResource(typeof(Dog))]
+            public partial class DogResource;
+
+            [GodotResource(typeof(User))]
+            public partial class UserResource;
+            """);
+
+        result.SingleGeneratorDiagnostic("GRG0006");
+        Assert.Contains(result.GeneratedResourceSources, source => source.HintName == "Demo.DogResource.GodotResource.g.cs");
+        Assert.DoesNotContain(result.GeneratedResourceSources, source => source.HintName == "Demo.UserResource.GodotResource.g.cs");
     }
 }

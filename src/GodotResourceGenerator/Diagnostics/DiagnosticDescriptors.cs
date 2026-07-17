@@ -62,4 +62,12 @@ internal static class DiagnosticDescriptors
         Usage,
         DiagnosticSeverity.Error,
         isEnabledByDefault: true);
+
+    public static readonly DiagnosticDescriptor InvalidResourceBaseType = new DiagnosticDescriptor(
+        "GRG0008",
+        "Invalid Godot resource base type",
+        "The Godot resource base for '{0}' is invalid: {1}",
+        Usage,
+        DiagnosticSeverity.Error,
+        isEnabledByDefault: true);
 }

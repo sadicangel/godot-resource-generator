@@ -66,13 +66,20 @@ public sealed class GodotResourceGenerator : IIncrementalGenerator
 
         cancellationToken.ThrowIfCancellationRequested();
 
-        var modelType = attribute.ConstructorArguments is [{ Value: INamedTypeSymbol type }]
+        var constructorArguments = attribute.ConstructorArguments;
+        var modelType = constructorArguments.Length >= 1 && constructorArguments[0].Value is INamedTypeSymbol type
             ? type
             : null;
+        var baseResourceType = constructorArguments.Length >= 2 && constructorArguments[1].Value is INamedTypeSymbol baseType
+            ? baseType
+            : null;
+        var explicitBaseType = GetExplicitBaseType(resourceType, context.SemanticModel.Compilation, cancellationToken);
 
         return new ResourceDeclaration(
             resourceType,
             modelType,
+            baseResourceType,
+            explicitBaseType,
             GetPrimaryLocation(resourceType),
             GetAttributeLocation(attribute) ?? GetPrimaryLocation(resourceType));
     }
@@ -119,6 +126,11 @@ public sealed class GodotResourceGenerator : IIncrementalGenerator
                     DiagnosticDescriptors.InvalidModelArgument,
                     declaration.AttributeLocation,
                     declaration.ResourceType.ToDisplayString(TypeDisplayFormat)));
+            }
+
+            if (!IsValidResourceBase(declaration, godotSymbols, diagnostics))
+            {
+                invalidDeclarations.Add(declaration);
             }
         }
 
@@ -187,6 +199,7 @@ public sealed class GodotResourceGenerator : IIncrementalGenerator
         var @namespace = resourceType.ContainingNamespace.IsGlobalNamespace
             ? string.Empty
             : resourceType.ContainingNamespace.ToDisplayString();
+        var effectiveBaseType = GetEffectiveBaseResourceType(declaration, godotSymbols);
 
         return new ResourceInfo(
             GetHintName(resourceType),
@@ -195,6 +208,8 @@ public sealed class GodotResourceGenerator : IIncrementalGenerator
             FullyQualifiedTypeName(resourceType),
             @namespace,
             FullyQualifiedTypeName(declaration.ModelType!),
+            FullyQualifiedTypeName(effectiveBaseType),
+            declaration.ExplicitBaseType is null,
             properties.ToImmutable());
     }
 
@@ -224,6 +239,70 @@ public sealed class GodotResourceGenerator : IIncrementalGenerator
             property.Type.ToDisplayString(TypeDisplayFormat));
     }
 
+    private static bool IsValidResourceBase(
+        ResourceDeclaration declaration,
+        GodotSymbols godotSymbols,
+        ImmutableArray<Diagnostic>.Builder diagnostics)
+    {
+        var attributeBaseType = declaration.AttributeBaseResourceType;
+        var explicitBaseType = declaration.ExplicitBaseType?.Type;
+
+        if (attributeBaseType is not null
+            && explicitBaseType is not null
+            && !ContainsUnresolvedType(attributeBaseType)
+            && !ContainsUnresolvedType(explicitBaseType)
+            && !SymbolEqualityComparer.Default.Equals(attributeBaseType, explicitBaseType))
+        {
+            diagnostics.Add(CreateInvalidResourceBaseDiagnostic(
+                declaration,
+                declaration.AttributeLocation,
+                $"attribute base '{attributeBaseType.ToDisplayString(TypeDisplayFormat)}' does not match explicit base '{explicitBaseType.ToDisplayString(TypeDisplayFormat)}'"));
+            return false;
+        }
+
+        var effectiveBaseType = GetEffectiveBaseResourceType(declaration, godotSymbols);
+        if (ContainsUnresolvedType(effectiveBaseType))
+        {
+            return true;
+        }
+
+        if (effectiveBaseType.IsUnboundGenericType
+            || effectiveBaseType.TypeKind != TypeKind.Class
+            || !InheritsFrom(effectiveBaseType, godotSymbols.Resource))
+        {
+            var location = declaration.AttributeBaseResourceType is not null
+                ? declaration.AttributeLocation
+                : declaration.ExplicitBaseType?.Location ?? declaration.AttributeLocation;
+
+            diagnostics.Add(CreateInvalidResourceBaseDiagnostic(
+                declaration,
+                location,
+                $"'{effectiveBaseType.ToDisplayString(TypeDisplayFormat)}' must be a closed type that derives from Godot.Resource"));
+            return false;
+        }
+
+        return true;
+    }
+
+    private static Diagnostic CreateInvalidResourceBaseDiagnostic(
+        ResourceDeclaration declaration,
+        Location? location,
+        string details)
+    {
+        return Diagnostic.Create(
+            DiagnosticDescriptors.InvalidResourceBaseType,
+            location,
+            declaration.ResourceType.ToDisplayString(TypeDisplayFormat),
+            details);
+    }
+
+    private static INamedTypeSymbol GetEffectiveBaseResourceType(ResourceDeclaration declaration, GodotSymbols godotSymbols)
+    {
+        return declaration.AttributeBaseResourceType
+            ?? declaration.ExplicitBaseType?.Type
+            ?? godotSymbols.Resource!;
+    }
+
     private static bool IsValidResourceTarget(INamedTypeSymbol resourceType)
     {
         return resourceType.TypeKind == TypeKind.Class
@@ -244,6 +323,37 @@ public sealed class GodotResourceGenerator : IIncrementalGenerator
         }
 
         return false;
+    }
+
+    private static ExplicitBaseTypeInfo? GetExplicitBaseType(
+        INamedTypeSymbol resourceType,
+        Compilation compilation,
+        CancellationToken cancellationToken)
+    {
+        foreach (var syntaxReference in resourceType.DeclaringSyntaxReferences)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+
+            if (syntaxReference.GetSyntax(cancellationToken) is not TypeDeclarationSyntax declaration
+                || declaration.BaseList is null)
+            {
+                continue;
+            }
+
+            var semanticModel = compilation.GetSemanticModel(declaration.SyntaxTree);
+            foreach (var baseTypeSyntax in declaration.BaseList.Types)
+            {
+                var baseType = semanticModel.GetTypeInfo(baseTypeSyntax.Type, cancellationToken).Type;
+                if (baseType is not INamedTypeSymbol namedBaseType || namedBaseType.TypeKind == TypeKind.Interface)
+                {
+                    continue;
+                }
+
+                return new ExplicitBaseTypeInfo(namedBaseType, baseTypeSyntax.GetLocation());
+            }
+        }
+
+        return null;
     }
 
     private static void ReportDuplicateModels(
@@ -348,7 +458,8 @@ public sealed class GodotResourceGenerator : IIncrementalGenerator
 
         builder.AppendLine(GeneratedCodeAttribute);
         builder.AppendLine("[global::Godot.GlobalClass]");
-        builder.AppendLine($"{resource.Accessibility} partial class {resource.Name} : global::Godot.Resource");
+        var baseClause = resource.ShouldDeclareBase ? $" : {resource.BaseTypeName}" : string.Empty;
+        builder.AppendLine($"{resource.Accessibility} partial class {resource.Name}{baseClause}");
         builder.AppendLine("{");
         builder.IncreaseIndent();
 
@@ -520,6 +631,45 @@ public sealed class GodotResourceGenerator : IIncrementalGenerator
             : $"@{identifier}";
     }
 
+    private static bool ContainsUnresolvedType(ITypeSymbol type)
+    {
+        if (type.TypeKind == TypeKind.Error)
+        {
+            return true;
+        }
+
+        if (type is IArrayTypeSymbol arrayType)
+        {
+            return ContainsUnresolvedType(arrayType.ElementType);
+        }
+
+        if (type is not INamedTypeSymbol namedType)
+        {
+            return false;
+        }
+
+        return namedType.TypeArguments.Any(ContainsUnresolvedType)
+            || (namedType.BaseType is not null && ContainsUnresolvedType(namedType.BaseType));
+    }
+
+    private static bool InheritsFrom(ITypeSymbol type, INamedTypeSymbol? baseType)
+    {
+        if (baseType is null)
+        {
+            return false;
+        }
+
+        for (var current = type; current is not null; current = current.BaseType)
+        {
+            if (SymbolEqualityComparer.Default.Equals(current, baseType))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
     private const string AttributeSource = """
         // <auto-generated/>
         #nullable enable
@@ -533,7 +683,15 @@ public sealed class GodotResourceGenerator : IIncrementalGenerator
                     ModelType = modelType;
                 }
 
+                public GodotResourceAttribute(global::System.Type modelType, global::System.Type baseResourceType)
+                {
+                    ModelType = modelType;
+                    BaseResourceType = baseResourceType;
+                }
+
                 public global::System.Type ModelType { get; }
+
+                public global::System.Type? BaseResourceType { get; }
             }
         }
         #nullable restore
@@ -565,6 +723,11 @@ public sealed class GodotResourceGenerator : IIncrementalGenerator
                 return null;
             }
 
+            if (ContainsUnresolvedType(type))
+            {
+                return TypeMapping.Direct(FullyQualifiedTypeName(type));
+            }
+
             if (type is IArrayTypeSymbol arrayType)
             {
                 var element = Resolve(arrayType.ElementType, property, allowCollection: false);
@@ -579,7 +742,8 @@ public sealed class GodotResourceGenerator : IIncrementalGenerator
                     : TypeMapping.Array($"{element.OutputType}[]", element);
             }
 
-            if (_mappings.TryGetValue(type, out var mappedResource))
+            var mappedResource = FindMappedResource(type);
+            if (mappedResource is not null)
             {
                 return TypeMapping.MappedResource(FullyQualifiedTypeName(mappedResource.ResourceType));
             }
@@ -619,6 +783,29 @@ public sealed class GodotResourceGenerator : IIncrementalGenerator
                             $"global::Godot.Collections.Array<{element.OutputType}>",
                             element);
                     }
+                }
+            }
+
+            return null;
+        }
+
+        private ResourceDeclaration? FindMappedResource(ITypeSymbol type)
+        {
+            if (_mappings.TryGetValue(type, out var mappedResource))
+            {
+                return mappedResource;
+            }
+
+            if (type is not INamedTypeSymbol namedType)
+            {
+                return null;
+            }
+
+            for (var baseType = namedType.BaseType; baseType is not null; baseType = baseType.BaseType)
+            {
+                if (_mappings.TryGetValue(baseType, out mappedResource))
+                {
+                    return mappedResource;
                 }
             }
 
@@ -754,23 +941,6 @@ public sealed class GodotResourceGenerator : IIncrementalGenerator
             return mapping.Kind == TypeMappingKind.Direct || mapping.Kind == TypeMappingKind.MappedResource;
         }
 
-        private static bool InheritsFrom(ITypeSymbol type, INamedTypeSymbol? baseType)
-        {
-            if (baseType is null)
-            {
-                return false;
-            }
-
-            for (var current = type; current is not null; current = current.BaseType)
-            {
-                if (SymbolEqualityComparer.Default.Equals(current, baseType))
-                {
-                    return true;
-                }
-            }
-
-            return false;
-        }
     }
 
     private sealed class GodotSymbols
@@ -846,8 +1016,12 @@ public sealed class GodotResourceGenerator : IIncrementalGenerator
     private sealed record ResourceDeclaration(
         INamedTypeSymbol ResourceType,
         INamedTypeSymbol? ModelType,
+        INamedTypeSymbol? AttributeBaseResourceType,
+        ExplicitBaseTypeInfo? ExplicitBaseType,
         Location? TargetLocation,
         Location? AttributeLocation);
+
+    private sealed record ExplicitBaseTypeInfo(INamedTypeSymbol Type, Location? Location);
 
     private sealed record GeneratorOutput(ImmutableArray<GeneratedSource> Sources, ImmutableArray<Diagnostic> Diagnostics)
     {
@@ -863,6 +1037,8 @@ public sealed class GodotResourceGenerator : IIncrementalGenerator
         string FullTypeName,
         string Namespace,
         string ModelTypeName,
+        string BaseTypeName,
+        bool ShouldDeclareBase,
         ImmutableArray<PropertyInfo> Properties);
 
     private sealed record PropertyInfo(string Name, string EscapedName, TypeMapping Mapping);

@@ -74,6 +74,28 @@ internal partial class UserResource : global::Godot.Resource
 }
 ```
 
+## Custom Resource Bases
+
+Generated resources derive from `Godot.Resource` by default. To use your own base resource type, either pass it as the second attribute argument:
+
+```csharp
+public abstract class GameResource : Godot.Resource
+{
+}
+
+[GodotResource(typeof(User), typeof(GameResource))]
+internal partial class UserResource;
+```
+
+Or declare the base on the partial resource class:
+
+```csharp
+[GodotResource(typeof(User))]
+internal partial class UserResource : GameResource;
+```
+
+The custom base type must derive from `Godot.Resource`. If both forms are used, they must name the same base type.
+
 ## Supported Types
 
 The generator supports public readable instance properties whose types can be exported by Godot:
@@ -86,6 +108,7 @@ The generator supports public readable instance properties whose types can be ex
 - C# arrays.
 - CLR sequences such as `List<T>` and `IReadOnlyList<T>`, emitted as `Godot.Collections.Array<T>`.
 - Nested model types annotated with `[GodotResource]`, emitted as their generated resource type.
+- Derived model properties can use the nearest mapped base model resource.
 
 Unsupported property types produce diagnostics and suppress generation for the affected resource.
 
