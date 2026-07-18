@@ -108,7 +108,7 @@ The generator supports public readable instance properties whose types can be ex
 - `Godot.Collections.Array`, `Array<T>`, `Dictionary`, and `Dictionary<TKey, TValue>` when generic arguments are supported.
 - C# arrays.
 - CLR sequences such as `List<T>` and `IReadOnlyList<T>`, emitted as `Godot.Collections.Array<T>`.
-- Nested model types annotated with `[GodotResource]`, emitted as their generated resource type.
+- Nested model classes or structs annotated with `[GodotResource]`, emitted as their generated resource type.
 - Derived model properties can use the nearest mapped base model resource.
 
 Unsupported property types produce diagnostics and suppress generation for the affected resource.

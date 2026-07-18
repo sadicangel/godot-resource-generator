@@ -119,7 +119,7 @@ public sealed class GodotResourceGenerator : IIncrementalGenerator
                     declaration.ResourceType.ToDisplayString(TypeDisplayFormat)));
             }
 
-            if (declaration.ModelType is null || declaration.ModelType.TypeKind != TypeKind.Class)
+            if (declaration.ModelType is null || !IsValidModelType(declaration.ModelType))
             {
                 invalidDeclarations.Add(declaration);
                 diagnostics.Add(Diagnostic.Create(
@@ -220,6 +220,7 @@ public sealed class GodotResourceGenerator : IIncrementalGenerator
             FullyQualifiedTypeName(resourceType),
             @namespace,
             FullyQualifiedTypeName(declaration.ModelType!),
+            declaration.ModelType!.TypeKind == TypeKind.Class,
             FullyQualifiedTypeName(effectiveBaseType),
             declaration.ExplicitBaseType is null,
             shouldCallBaseCopyFrom,
@@ -337,6 +338,11 @@ public sealed class GodotResourceGenerator : IIncrementalGenerator
             && resourceType.ContainingType is null
             && resourceType.TypeParameters.Length == 0
             && IsPartial(resourceType);
+    }
+
+    private static bool IsValidModelType(INamedTypeSymbol modelType)
+    {
+        return modelType.TypeKind is TypeKind.Class or TypeKind.Struct;
     }
 
     private static bool IsPartial(INamedTypeSymbol type)
@@ -580,8 +586,11 @@ public sealed class GodotResourceGenerator : IIncrementalGenerator
         builder.AppendLine($"public static {resource.FullTypeName} FromModel({resource.ModelTypeName} model)");
         builder.AppendLine("{");
         builder.IncreaseIndent();
-        builder.AppendLine("if (model is null) throw new global::System.ArgumentNullException(nameof(model));");
-        builder.AppendLine();
+        if (resource.ModelCanBeNull)
+        {
+            builder.AppendLine("if (model is null) throw new global::System.ArgumentNullException(nameof(model));");
+            builder.AppendLine();
+        }
         builder.AppendLine($"var resource = new {resource.FullTypeName}();");
         builder.AppendLine("resource.CopyFrom(model);");
         builder.AppendLine("return resource;");
@@ -592,10 +601,13 @@ public sealed class GodotResourceGenerator : IIncrementalGenerator
         builder.AppendLine($"public void CopyFrom({resource.ModelTypeName} model)");
         builder.AppendLine("{");
         builder.IncreaseIndent();
-        builder.AppendLine("if (model is null) throw new global::System.ArgumentNullException(nameof(model));");
+        if (resource.ModelCanBeNull)
+        {
+            builder.AppendLine("if (model is null) throw new global::System.ArgumentNullException(nameof(model));");
+        }
 
         var propertiesToCopy = resource.Properties.Where(static property => property.ShouldCopy).ToImmutableArray();
-        if (resource.ShouldCallBaseCopyFrom || !propertiesToCopy.IsDefaultOrEmpty)
+        if ((resource.ShouldCallBaseCopyFrom || !propertiesToCopy.IsDefaultOrEmpty) && resource.ModelCanBeNull)
         {
             builder.AppendLine();
         }
@@ -705,9 +717,14 @@ public sealed class GodotResourceGenerator : IIncrementalGenerator
 
     private static string ToConvertedExpression(string sourceExpression, TypeMapping mapping)
     {
-        return mapping.Kind == TypeMappingKind.MappedResource
+        if (mapping.Kind != TypeMappingKind.MappedResource)
+        {
+            return sourceExpression;
+        }
+
+        return mapping.SourceCanBeNull
             ? $"{sourceExpression} is null ? null : {mapping.OutputType}.FromModel({sourceExpression})"
-            : sourceExpression;
+            : $"{mapping.OutputType}.FromModel({sourceExpression})";
     }
 
     private static Location? GetPrimaryLocation(ISymbol symbol)
@@ -858,7 +875,7 @@ public sealed class GodotResourceGenerator : IIncrementalGenerator
             var mappedResource = FindMappedResource(type);
             if (mappedResource is not null)
             {
-                return TypeMapping.MappedResource(FullyQualifiedTypeName(mappedResource.ResourceType));
+                return TypeMapping.MappedResource(FullyQualifiedTypeName(mappedResource.ResourceType), TypeCanBeNull(type));
             }
 
             if (IsDirectVariantType(type))
@@ -1070,6 +1087,11 @@ public sealed class GodotResourceGenerator : IIncrementalGenerator
             return mapping.Kind == TypeMappingKind.Direct || mapping.Kind == TypeMappingKind.MappedResource;
         }
 
+        private static bool TypeCanBeNull(ITypeSymbol type)
+        {
+            return !type.IsValueType;
+        }
+
     }
 
     private sealed class GodotSymbols
@@ -1166,6 +1188,7 @@ public sealed class GodotResourceGenerator : IIncrementalGenerator
         string FullTypeName,
         string Namespace,
         string ModelTypeName,
+        bool ModelCanBeNull,
         string BaseTypeName,
         bool ShouldDeclareBase,
         bool ShouldCallBaseCopyFrom,
@@ -1173,26 +1196,26 @@ public sealed class GodotResourceGenerator : IIncrementalGenerator
 
     private sealed record PropertyInfo(string Name, string EscapedName, TypeMapping Mapping, bool ShouldDeclare, bool ShouldCopy);
 
-    private sealed record TypeMapping(string OutputType, TypeMappingKind Kind, TypeMapping? ElementMapping)
+    private sealed record TypeMapping(string OutputType, TypeMappingKind Kind, TypeMapping? ElementMapping, bool SourceCanBeNull)
     {
         public static TypeMapping Direct(string outputType)
         {
-            return new TypeMapping(outputType, TypeMappingKind.Direct, null);
+            return new TypeMapping(outputType, TypeMappingKind.Direct, null, false);
         }
 
-        public static TypeMapping MappedResource(string outputType)
+        public static TypeMapping MappedResource(string outputType, bool sourceCanBeNull)
         {
-            return new TypeMapping(outputType, TypeMappingKind.MappedResource, null);
+            return new TypeMapping(outputType, TypeMappingKind.MappedResource, null, sourceCanBeNull);
         }
 
         public static TypeMapping Array(string outputType, TypeMapping element)
         {
-            return new TypeMapping(outputType, TypeMappingKind.Array, element);
+            return new TypeMapping(outputType, TypeMappingKind.Array, element, false);
         }
 
         public static TypeMapping Enumerable(string outputType, TypeMapping element)
         {
-            return new TypeMapping(outputType, TypeMappingKind.Enumerable, element);
+            return new TypeMapping(outputType, TypeMappingKind.Enumerable, element, false);
         }
     }
 

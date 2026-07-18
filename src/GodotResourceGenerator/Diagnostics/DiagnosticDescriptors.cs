@@ -18,7 +18,7 @@ internal static class DiagnosticDescriptors
     public static readonly DiagnosticDescriptor InvalidModelArgument = new DiagnosticDescriptor(
         "GRG0002",
         "Invalid Godot resource model",
-        "The [GodotResource] attribute on '{0}' must reference a source model class with typeof(...)",
+        "The [GodotResource] attribute on '{0}' must reference a source model class or struct with typeof(...)",
         Usage,
         DiagnosticSeverity.Error,
         isEnabledByDefault: true);

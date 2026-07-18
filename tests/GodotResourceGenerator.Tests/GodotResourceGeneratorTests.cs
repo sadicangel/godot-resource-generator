@@ -77,6 +77,55 @@ public sealed class GodotResourceGeneratorTests
     }
 
     [Fact]
+    public void Maps_nested_annotated_struct_models_to_generated_resources()
+    {
+        var result = GeneratorTestDriver.Run("""
+            using GodotResourceGenerator;
+
+            namespace Demo;
+
+            public enum Element
+            {
+                Fire,
+            }
+
+            public enum Seat
+            {
+                Red,
+            }
+
+            public readonly record struct CardRanks(int Top, int Right, int Bottom, int Left);
+
+            public sealed record CardSnapshot(
+                string CardInstanceId,
+                int CardNumber,
+                string Name,
+                Element Element,
+                CardRanks Ranks,
+                Seat Owner,
+                bool IsFaceUp,
+                bool IsPlayable);
+
+            [GodotResource(typeof(CardRanks))]
+            public partial class CardRanksResource;
+
+            [GodotResource(typeof(CardSnapshot))]
+            public partial class CardSnapshotResource;
+            """);
+
+        result.AssertNoErrors();
+        var ranksGenerated = result.GeneratedResourceSources.Single(source => source.HintName == "Demo.CardRanksResource.GodotResource.g.cs").Source;
+        var snapshotGenerated = result.GeneratedResourceSources.Single(source => source.HintName == "Demo.CardSnapshotResource.GodotResource.g.cs").Source;
+
+        Assert.Contains("public int Top { get; set; }", ranksGenerated);
+        Assert.Contains("public static global::Demo.CardRanksResource FromModel(global::Demo.CardRanks model)", ranksGenerated);
+        Assert.DoesNotContain("if (model is null)", ranksGenerated);
+        Assert.Contains("public global::Demo.CardRanksResource Ranks { get; set; }", snapshotGenerated);
+        Assert.Contains("Ranks = global::Demo.CardRanksResource.FromModel(model.Ranks);", snapshotGenerated);
+        Assert.DoesNotContain("model.Ranks is null", snapshotGenerated);
+    }
+
+    [Fact]
     public void Converts_arrays_and_clr_sequences_with_mapped_elements()
     {
         var result = GeneratorTestDriver.Run("""
@@ -419,6 +468,24 @@ public sealed class GodotResourceGeneratorTests
 
             [GodotResource(typeof(User))]
             public partial class UserResource;
+            """);
+
+        result.SingleGeneratorDiagnostic("GRG0006");
+        Assert.Empty(result.GeneratedResourceSources);
+    }
+
+    [Fact]
+    public void Reports_unannotated_custom_struct_property_type()
+    {
+        var result = GeneratorTestDriver.Run("""
+            using GodotResourceGenerator;
+
+            public readonly record struct CardRanks(int Top, int Right, int Bottom, int Left);
+
+            public sealed record CardSnapshot(CardRanks Ranks);
+
+            [GodotResource(typeof(CardSnapshot))]
+            public partial class CardSnapshotResource;
             """);
 
         result.SingleGeneratorDiagnostic("GRG0006");
